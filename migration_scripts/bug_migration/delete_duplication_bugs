@@ -1,0 +1,109 @@
+import requests
+import base64
+
+# Azure DevOps credentials
+azure_pat = ""
+organization = "rapyuta-robotics"
+project = "sootballs"
+
+# Encode PAT for authentication
+auth = base64.b64encode(f":{azure_pat}".encode()).decode()
+
+def get_work_items(area_path):
+    url = f"https://dev.azure.com/{organization}/{project}/_apis/wit/wiql?api-version=6.0"
+    query = {
+        "query": f"SELECT [System.Id] FROM workitems WHERE [System.WorkItemType] = 'bug' AND [System.AreaPath] = '{area_path}' ORDER BY [System.Title]"
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Basic {auth}"
+    }
+    response = requests.post(url, headers=headers, json=query)
+    if response.status_code == 200:
+        work_items = response.json()
+        return work_items['workItems']
+    else:
+        print(f"Failed to retrieve work items in {area_path}: {response.status_code} - {response.text}")
+        return None
+
+
+def get_work_item_details(work_item_id):
+    url = f"https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/{work_item_id}?$expand=relations&api-version=6.0"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Basic {auth}"
+    }
+    response = requests.get(url, headers=headers)
+    if response.status_code == 200:
+        work_item_details = response.json()
+        return work_item_details
+    else:
+        print(f"Failed to retrieve work item details: {response.status_code} - {response.text}")
+        return None
+
+def delete_work_item(work_item_id):
+    url = f"https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/{work_item_id}?api-version=6.0"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Basic {auth}"
+    }
+    response = requests.delete(url, headers=headers)
+    if response.status_code == 200:
+        print(f"Successfully deleted work item {work_item_id}")
+    else:
+        print(f"Failed to delete work item {work_item_id}: {response.status_code}")
+
+def remove_duplicates():
+    work_items_temp1 = get_work_items("sootballs\\issues\\3.1_issues")
+    work_items_temp2 = get_work_items("sootballs\\issues\\3.3_issues")
+
+    if not work_items_temp1:
+        print("No work items found in Temp1.")
+        return
+    if not work_items_temp2:
+        print("No work items found in Temp2.")
+        return
+
+    titles_seen_temp2 = set()
+    duplicates_temp1 = []
+
+    print("\nProcessing Temp2 work items...")
+    for item in work_items_temp2:
+        work_item_id = item['id']
+        work_item_details = get_work_item_details(work_item_id)
+        work_item_title = work_item_details['fields']['System.Title']
+        titles_seen_temp2.add(work_item_title)
+
+    print("\nProcessing Temp1 work items...")
+    for item in work_items_temp1:
+        work_item_id = item['id']
+        work_item_details = get_work_item_details(work_item_id)
+        work_item_title = work_item_details['fields']['System.Title']
+
+        print(f"Checking work item: {work_item_id} - {work_item_title}")
+
+        if work_item_title in titles_seen_temp2:
+            duplicates_temp1.append(work_item_id)
+            print(f"Marked as duplicate: {work_item_id} - {work_item_title}")
+
+    if duplicates_temp1:
+        print(f"\nFound {len(duplicates_temp1)} duplicate work items in Temp1. Deleting...")
+        for work_item_id in duplicates_temp1:
+            work_item_details = get_work_item_details(work_item_id)
+            if work_item_details:
+                # Delete child tasks first
+                if 'relations' in work_item_details:
+                    child_tasks = [relation['url'].split('/')[-1] for relation in work_item_details['relations'] if relation['rel'] == 'System.LinkTypes.Hierarchy-Forward']
+                    for child_task_id in child_tasks:
+                        print(f"Deleting child task: {child_task_id}")
+                        delete_work_item(child_task_id)
+                
+                # Then delete the parent task
+                print(f"Deleting parent task: {work_item_id}")
+                delete_work_item(work_item_id)
+
+    else:
+        print("No duplicate work items found in Temp1.")
+
+# Run the function to remove duplicates
+remove_duplicates()
