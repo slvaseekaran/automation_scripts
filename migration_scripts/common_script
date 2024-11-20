@@ -1,0 +1,576 @@
+import requests
+import json
+import base64
+import sys
+import csv
+
+# Configuration
+wrike_token = ""
+premalink = "" #Give folder link that want to migrate
+folder_id = ""  # Initialize with an empty string
+
+azure_pat = ""
+organization = "rapyuta-robotics"
+project = "" #specify your project
+
+area_path = "" #specify your area_path
+iteration_path = "" #specify your iteration path
+
+
+# Define default values
+default_values = {
+    'author': 'missing.user@rapyuta-robotics.com',
+    'assignee': 'missing.user@rapyuta-robotics.com',
+    # include if you need any default values
+}
+
+# Define custom field IDs
+custom_field_ids = {
+    # eg: "contact": "IEABWYFPJUACLKMO",
+    # you can get this by un-commenting line 75 and 76
+}
+
+# Define the mapping of Wrike statuses to Azure states
+status_mapping = {
+    'New' : 'New',
+    'Completed': 'Completed',
+    #add this accordingly to map status
+}
+
+# Get folder Id from Wrike:
+def get_folder_id():
+    url = "https://www.wrike.com/api/v4"
+    headers = {'Authorization': f'bearer {wrike_token}'}
+    response = requests.get(f'{url}/folders?permalink={premalink}', headers=headers)
+    
+    if response.status_code == 200:
+        folder_details = response.json()
+        return folder_details['data'][0]['id']
+    else:
+        print(f'Failed to get folder id: {response.status_code}')
+        return None
+
+# Fetch tasks from Wrike
+def fetch_wrike_tasks():
+    url = "https://www.wrike.com/api/v4"
+    headers = {"Authorization": f"Bearer {wrike_token}"}
+    response = requests.get(f'{url}/folders/{folder_id}/tasks?&fields=["authorIds","customItemTypeId","responsibleIds","description","hasAttachments","dependencyIds","superParentIds","superTaskIds","metadata","customFields","parentIds","sharedIds","recurrent","briefDescription","attachmentCount","subTaskIds"]&sortField=CreatedDate', headers=headers)
+    
+    if response.status_code == 200:
+        # print(response.json()['data'])
+        # sys.exit()
+        return response.json()['data']
+    else:
+        response.raise_for_status()
+
+# Function to Fetch subtask details from Wrike
+def fetch_subtask_details(subtask_id):
+    url = "https://www.wrike.com/api/v4"
+    headers = {'Authorization': f'Bearer {wrike_token}'}
+    response = requests.get(f'{url}/tasks/{subtask_id}', headers=headers)
+    
+    if response.status_code == 200:
+        return response.json()['data'][0]
+    else:
+        print(f'Failed to get subtask details: {response.status_code}')
+        return None
+
+# Function to check if the task already exists in Azure Boards
+def task_exists_in_azure(task_title):
+    query_url = f"https://dev.azure.com/{organization}/{project}/_apis/wit/wiql?api-version=6.0"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Basic {base64.b64encode(f':{azure_pat}'.encode()).decode()}"
+    }
+    
+    # Query to check if the task title already exists
+    query = {
+        "query": f"SELECT [System.Id] FROM WorkItems WHERE [System.Title] = '{task_title}'"
+    }
+    
+    response = requests.post(query_url, headers=headers, json=query)
+    
+    if response.status_code == 200:
+        results = response.json().get('workItems', [])
+        return len(results) > 0  # Returns True if any work items match the title
+    else:
+        print(f"Error checking task existence: {response.status_code}")
+        return False
+
+# Function to Fetch Assignee Name from Wrike
+def fetch_assignee_name(user_id):
+    url = "https://www.wrike.com/api/v4"
+    headers = {'Authorization': f'Bearer {wrike_token}'}
+    response = requests.get(f'{url}/users/{user_id}', headers=headers)
+    
+    if response.status_code == 200:
+        user_data = response.json()['data'][0]
+        if user_data['deleted']:
+            return default_values['assignee']
+        elif user_data.get('primaryEmail') is None or user_data['primaryEmail'] == '':
+            return default_values['assignee']
+        else:
+            return user_data['primaryEmail']
+    else:
+        print(f"Error fetching assignee: {response.text}")
+        return default_values['assignee']
+   
+# Function to Fetch Auhtor Name from Wrike
+def fetch_author_name(user_id):
+    url = "https://www.wrike.com/api/v4"
+    headers = {'Authorization': f'Bearer {wrike_token}'}
+    response = requests.get(f'{url}/users/{user_id}', headers=headers)
+    
+    if response.status_code == 200:
+        user_data = response.json()['data'][0]
+        if user_data['deleted']:
+            return default_values['author']
+        elif user_data.get('primaryEmail') is None or user_data['primaryEmail'] == '':
+            return default_values['author']
+        else:
+            return user_data['primaryEmail']
+    else:
+        print(f"Error fetching author: {response.text}")
+        return default_values['author']
+
+
+# Fetch attachments for a specific task from Wrike
+def fetch_task_attachments(task_id):
+    url = f"https://www.wrike.com/api/v4/tasks/{task_id}/attachments"
+    headers = {"Authorization": f"Bearer {wrike_token}"}
+    response = requests.get(url, headers=headers)
+
+    if response.status_code == 200:
+        attachments = response.json()['data']
+        #print(f"Fetched {len(attachments)} attachments for task {task_id}.")
+        return attachments
+    else:
+        print(f"Failed to fetch attachments for task {task_id}: {response.status_code}")
+        print(response.text)
+        return []
+
+# Fetch attachment's URL for a specific attachment in Wrike
+def fetch_attachments_url(attachment_id):
+    url = f"https://www.wrike.com/api/v4/attachments/{attachment_id}/url"
+    headers = {"Authorization": f"Bearer {wrike_token}"}
+    response = requests.get(url, headers=headers)
+
+    if response.status_code == 200:
+        attachment_url = response.json()['data'][0]['url']
+        #print(f"Fetched URL for attachment {attachment_id}.")
+        return attachment_url
+    else:
+        print(f"Failed to fetch attachment URL for attachment {attachment_id}: {response.status_code}")
+        print(response.text)
+        return None
+
+# Fetch the actual attachment data from the provided URL
+def fetch_attachment_data(attachment_url):
+    response = requests.get(attachment_url)
+
+    if response.status_code == 200:
+        #print(f"Successfully fetched attachment data from {attachment_url}.")
+        return response.content  # Return the binary content of the file
+    else:
+        print(f"Failed to fetch attachment data from {attachment_url}: {response.status_code}")
+        print(response.text)
+        return None
+
+# Fetch comments for a specific task from Wrike
+def fetch_wrike_comments(task_id):
+    url = f'https://www.wrike.com/api/v4/tasks/{task_id}/comments'
+    headers = {
+        'Authorization': f'Bearer {wrike_token}'
+    }
+    response = requests.get(url, headers=headers)
+
+    if response.status_code == 200:
+        comments = response.json().get('data', [])
+        #print(f"Fetched {len(comments)} comments from Wrike for task {task_id}")
+        return comments
+    else:
+        print(f'Error fetching comments for task {task_id}: {response.status_code} {response.text}')
+        return []
+
+
+# Function to fetch custom status details from Wrike
+def get_custom_status(status_id):
+    url = f"https://www.wrike.com/api/v4/customstatuses/{status_id}"
+    headers = {'Authorization': f'Bearer {wrike_token}'}
+    response = requests.get(url, headers=headers)
+    
+    if response.status_code == 200:
+        print(response.json()['data'][0])
+        return response.json()['data'][0]
+    else:
+        print(f"Failed to get custom status details: {response.status_code}")
+        return None  
+
+# Function to fetch task dependencies details from Wrike
+def get_task_dependencies(task_id):
+    url = "https://www.wrike.com/api/v4"
+    headers = {'Authorization': f'Bearer {wrike_token}'}
+    response = requests.get(f'{url}/tasks/{task_id}/dependencies', headers=headers)
+    
+    if response.status_code == 200:
+        dependencies = response.json()
+        return dependencies['data']
+    else:
+        print(f"Failed to fetch dependencies: {response.status_code} - {response.text}")
+        return None
+
+# Post comments to the System.History field in Azure Boards
+def post_azure_devops_comments(work_item_id, comments):
+    url = f'https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/{work_item_id}?api-version=6.0'
+    headers = {
+        'Content-Type': 'application/json-patch+json',
+        'Authorization': f'Basic {base64.b64encode(f":{azure_pat}".encode()).decode()}'
+    }
+
+    for comment in comments:
+        #print("FTECHED_COMMENT: ",comment)
+        comment_text = comment['text']
+        data = [
+            {
+                'op': 'add',
+                'path': '/fields/System.History',
+                'value': comment_text
+            }
+        ]
+
+        try:
+            response = requests.patch(url, json=data, headers=headers)
+            if response.status_code in [200, 201]:
+                print(f'Comment added to work item!')
+                #print('------')
+            else:
+                print(f'Error adding comment to work item {work_item_id}: {response.status_code} {response.text}')
+        except Exception as e:
+            print(f"An error occurred while posting comment to work item {work_item_id}: {e}")
+
+# Post the attachment to Azure DevOps
+def post_attachment_to_azure(work_item_id, attachment_id, attachment_name):
+
+    # Fetch the attachment URL
+    attachment_url = fetch_attachments_url(attachment_id)
+
+    if attachment_url:
+        # Fetch the attachment data
+        attachment_data = fetch_attachment_data(attachment_url)
+
+        if attachment_data:
+            # Upload the file to Azure DevOps as an attachment
+            upload_url = f"https://dev.azure.com/{organization}/{project}/_apis/wit/attachments?fileName={attachment_name}&api-version=6.0"
+            headers = {
+                "Authorization": f"Basic {base64.b64encode(f':{azure_pat}'.encode()).decode()}",
+                "Content-Type": "application/octet-stream"
+            }
+
+            response = requests.post(upload_url, headers=headers, data=attachment_data, timeout=1800)
+
+            if response.status_code == 201:
+                azure_attachment_url = response.json()['url']
+                #print(f"Attachment '{attachment_name}' uploaded successfully to Azure.")
+
+                # Attach the uploaded file to the work item
+                json_patch_document = [
+                    {
+                        "op": "add",
+                        "path": "/relations/-",
+                        "value": {
+                            "rel": "AttachedFile",
+                            "url": azure_attachment_url,
+                            "attributes": {
+                                "comment": "Migrated from Wrike"
+                            }
+                        }
+                    }
+                ]
+
+                patch_url = f"https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/{work_item_id}?api-version=6.0"
+                patch_headers = {
+                    "Content-Type": "application/json-patch+json",
+                    "Authorization": f"Basic {base64.b64encode(f':{azure_pat}'.encode()).decode()}"
+                }
+
+                patch_response = requests.patch(patch_url, headers=patch_headers, json=json_patch_document)
+
+                if patch_response.status_code in [200, 201]:
+                    print(f"Successfully attached file!")
+                else:
+                    print(f"Failed to attach file '{attachment_name}' to work item {work_item_id}: {patch_response.status_code}")
+                    print(patch_response.text)
+            else:
+                print(f"Failed to upload attachment '{attachment_name}' to Azure: {response.status_code}")
+                print(response.text)
+        else:
+            print(f"Failed to fetch attachment data for {attachment_id} from Wrike.")
+    else:
+        print(f"Failed to fetch attachment URL for attachment {attachment_id} from Wrike.")
+
+# Function to update the state of an Azure work item
+def update_azure_task_state(work_item_id, new_state):
+    if new_state is None:
+        print(f"Error: No valid state provided for work item {work_item_id}.")
+        return
+
+    url = f"https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/{work_item_id}?api-version=6.0"
+    headers = {
+        "Content-Type": "application/json-patch+json",
+        "Authorization": f"Basic {base64.b64encode(f':{azure_pat}'.encode()).decode()}"
+    }
+
+    print(f"Attempting to update work item {work_item_id} to state: {new_state}")
+
+    # Patch request body to update the state
+    body = [
+        {
+            "op": "replace",
+            "path": "/fields/System.State",
+            "value": new_state
+        }
+    ]
+
+    try:
+        response = requests.patch(url, headers=headers, json=body)
+        if response.status_code in (200, 201):
+            print(f"Work item {work_item_id} state updated to {new_state} successfully.")
+            return response.json()  # Return updated work item details
+        else:
+            print(f"Failed to update state. Status code: {response.status_code}, Response: {response.text}")
+    except requests.RequestException as e:
+        print(f"Request failed: {e}")
+
+
+# Function to create tasks in Azure Boards
+def create_azure_task(task_data):
+
+    # Check if the task already exists
+    existing_task_id = task_exists_in_azure(task_data['title'])
+
+    if existing_task_id:
+        print(f"Task '{task_data['title']}' already exists in Azure.")
+        return None  # Skip creation if the task is found
+
+    workItemType = ""  #specify your work item type
+    url = f"https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/${workItemType}?api-version=6.0"
+    headers = {
+        "Content-Type": "application/json-patch+json",
+        "Authorization": f"Basic {base64.b64encode(f':{azure_pat}'.encode()).decode()}"
+    }
+
+    # Prepare the body with safe checks for None values
+    body = [
+        {"op": "add", "path": "/fields/System.Title", "value": task_data['title']},
+        {"op": "add", "path": "/fields/System.Description", "value": task_data['description']},
+        {"op": "add", "path": "/fields/System.AreaPath", "value": area_path},
+        {"op": "add", "path": "/fields/System.IterationPath", "value": iteration_path},
+        {"op": "add", "path": "/fields/Custom.Author", "value": task_data['author_email']},
+        # add custom fields needed
+    ]
+
+    if task_data.get("assignee_email"):
+        body.append({"op": "add", "path": "/fields/System.AssignedTo", "value": task_data['assignee_email']})
+
+    try:
+        response = requests.post(url, headers=headers, json=body)
+        if response.status_code in [200, 201]:
+            azure_work_item = response.json()
+            work_item_id = azure_work_item['id']
+            print(f"Task created: {work_item_id}")
+
+            tag_patch = [
+                {
+                    "op": "add",
+                    "path": "/fields/System.Tags",
+                    "value": "", #specify your tags
+                }
+            ]
+            tag_response = requests.patch(f"https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/{work_item_id}?api-version=6.0", headers=headers, json=tag_patch)
+            if tag_response.status_code in [200, 201]:
+                print("Task created:", task_data['title'])
+                print("Tags added.")
+            else:
+                print(f"Tag addition failed: {tag_response.status_code}")
+                
+            return work_item_id
+        else:
+            print(f"Task creation failed: {response.status_code}")
+            return None
+    except Exception as e:
+        print(f"Error creating task: {e}")
+        return None
+
+
+def create_azure_subtask(task_data):
+    workItemType = "" #specify your work item type
+    url = f"https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/${workItemType}?api-version=6.0"
+    headers = {
+        "Content-Type": "application/json-patch+json",
+        "Authorization": f"Basic {base64.b64encode(f':{azure_pat}'.encode()).decode()}"
+    }
+    
+    # Log subtask creation
+    print("Subtask is created.")
+    
+    body = [
+        {"op": "add", "path": "/fields/System.Title","value": task_data['title']},
+        {"op": "add", "path": "/fields/System.Description","value": task_data['description']},
+        {"op": "add", "path": "/fields/System.AssignedTo","value": task_data['assignee']},
+        {"op": "add", "path": "/fields/Custom.Author", "value": task_data['author_email']},  # Ensure this is correct
+        {"op": "add", "path": "/fields/System.AreaPath", "value": task_data['area_path']},
+        {"op": "add", "path": "/fields/System.IterationPath", "value": task_data['iteration_path']},
+        # add custom fields needed
+    ]
+    
+    response = requests.post(url, headers=headers, json=body)
+
+
+    if response.status_code in [200, 201]:
+        print("Subtask created.")
+        return response.json()
+    else:
+        print(f"Subtask creation failed: {response.status_code} - {task_data['title']}")
+        return None  # Return None to indicate failure
+
+
+
+# Function to create a work item link in Azure Boards
+def create_work_item_link(parent_id, child_id):
+    url = f"https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/{parent_id}?api-version=6.0"
+    headers = {
+        "Content-Type": "application/json-patch+json",
+        "Authorization": f"Basic {base64.b64encode(f':{azure_pat}'.encode()).decode()}"
+    }
+    body = [
+        {
+            "op": "add",
+            "path": "/relations/-",
+            "value": {
+                "rel": "System.LinkTypes.Hierarchy-Forward",
+                "url": f"https://dev.azure.com/{organization}/{project}/_apis/wit/workItems/{child_id}",
+                "attributes": {"comment": "Linking child task to parent task"}
+            }
+        }
+    ]
+    response = requests.patch(url, headers=headers, data=json.dumps(body))
+    
+    if response.status_code == 200 or response.status_code == 201:
+        print("LINK CREATED")
+        return response.json()
+    else:
+        if response.status_code == 400 and "WorkItemLinkAddExtraParentException" in response.text:
+            print(f"Task {child_id} already has a parent.")
+        else:
+            print(f"Failed to Link Parent and Child Tasks in Azure : {response.status_code}")
+        response.raise_for_status()
+
+
+
+def migrate_wrike_tasks_to_azure():
+    global folder_id
+    folder_id = get_folder_id()
+
+    if folder_id:
+        wrike_tasks = fetch_wrike_tasks()
+
+        for task in wrike_tasks:
+            # Fetch assignee email
+            assignee_email = fetch_assignee_name(task['responsibleIds'][0]) if task.get('responsibleIds') else default_values['assignee']
+
+            # Prepare custom field values
+            custom_field_values = {field['id']: field['value'] for field in task.get('customFields', [])}
+
+            # Prepare task data
+            task_data = {
+                'title': task['title'],
+                'description': task['description'],
+                'author_email': fetch_author_name(task['authorIds'][0]) if task.get('authorIds') else default_values['author'],
+                'assignee_email': assignee_email,
+                'status': status_mapping.get(task['status'], None),
+                # add custom fields needed
+            }
+
+            # Create the task in Azure DevOps
+            azure_task_id = create_azure_task(task_data)
+
+            if azure_task_id:
+                # Update task state in Azure
+                if task_data['status']:
+                    update_azure_task_state(azure_task_id, task_data['status'])
+
+                # Fetch and migrate attachments
+                if task.get('hasAttachments'):
+                    task_attachments = fetch_task_attachments(task['id'])
+                    for attachment in task_attachments:
+                        post_attachment_to_azure(azure_task_id, attachment['id'], attachment['name'])
+
+                # Fetch and migrate comments
+                task_comments = fetch_wrike_comments(task['id'])
+                post_azure_devops_comments(azure_task_id, task_comments)
+
+            # Handle subtasks
+            migrate_subtasks(task, azure_task_id)
+
+    else:
+        print("Failed to retrieve folder ID from Wrike. Migration aborted.")
+
+def migrate_subtasks(parent_task, parent_azure_id):
+    for subtask_id in parent_task.get('subTaskIds', []):
+        subtask_details = fetch_subtask_details(subtask_id)
+        
+        if subtask_details:
+            subtask_title = subtask_details["title"]
+
+            # Fetch assignees and author's email
+            subtask_assignees = (
+                [fetch_assignee_name(user_id) for user_id in subtask_details.get('responsibleIds', [])] or 
+                ['missing.user@rapyuta-robotics.com']
+            )[0]
+
+            subtask_author_email = [fetch_author_name(user_id) for user_id in subtask_details.get('authorIds', [])][0]
+
+            azure_subtask = create_azure_subtask({
+                "title": subtask_title,
+                "description": subtask_details['description'],
+                "assignee": subtask_assignees,
+                "author_email": subtask_author_email,
+                "area_path": area_path,
+                "iteration_path": iteration_path,
+                # add custom fields needed
+            })
+            
+            if azure_subtask:
+                wrike_subtask_id = subtask_details['id']
+                azure_subtask_id = azure_subtask['id']
+
+                # Map the status correctly
+                sub_task_wrike_status = get_custom_status(subtask_details['customStatusId'])['name']
+                azure_state = status_mapping.get(sub_task_wrike_status)
+
+                if azure_state:
+                    update_azure_task_state(azure_subtask_id, azure_state)
+                    print(f"Updated Azure subtask {azure_subtask_id} to state '{azure_state}' based on Wrike status '{sub_task_wrike_status}'")
+                else:
+                    print(f"Warning: No Azure state found for Wrike status '{sub_task_wrike_status}'.")
+
+                # Migrate comments
+                comments = fetch_wrike_comments(wrike_subtask_id)
+                post_azure_devops_comments(azure_subtask_id, comments)
+
+                # Migrate attachments
+                attachments = fetch_task_attachments(wrike_subtask_id)
+                for attachment in attachments:
+                    post_attachment_to_azure(azure_subtask_id, attachment['id'], attachment['name'])
+
+                try:
+                    create_work_item_link(parent_azure_id, azure_subtask_id)
+                except requests.exceptions.HTTPError:
+                    pass  # Silent on existing parent link issue
+
+                # Recursive call to migrate further nested subtasks
+                migrate_subtasks(subtask_details, azure_subtask_id)
+
+
+if __name__ == "__main__":
+    migrate_wrike_tasks_to_azure()
