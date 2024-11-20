@@ -1,3 +1,3 @@
 # migration_scripts
 
-This repos contains migration scripts for reference.
+This repository contains reference migration scripts that can be modified as needed to suit our requirements.
