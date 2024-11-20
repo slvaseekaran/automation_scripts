@@ -1,0 +1,590 @@
+import requests
+import json
+import base64
+import sys
+import csv
+import os
+import pandas as pd
+
+# Example usage
+wrike_token = ""
+azure_pat = ""
+organization = "rapyuta-robotics"
+project = "sootballs"
+area_path = "sootballs\\sootballs_support"
+iteration_path = "sootballs\\PI2"
+
+
+# Define custom field IDs
+custom_field_ids = {
+    "contact": "IEABWYFPJUACLKMO",
+    "sw_version": "IEABWYFPJUACL4TE",
+    "amr_no" : "IEABWYFPJUACX4MY",
+    "primary_item": "IEABWYFPJUADQMHL",
+    "secondary_item": "IEABWYFPJUADQMH2",
+    "request_squad": "IEABWYFPJUACR3OM",
+    "priority": "IEABWYFPJUACL4XS",
+    "cause": "IEABWYFPJUACOQXH",
+    "recovery_way": "IEABWYFPJUACOQXI",
+    "product" : "IEABWYFPJUACL4SN",
+    "sla" : "IEABWYFPJUAF6TWP",
+    "incident":"IEABWYFPJUACOQ2X",
+    "glory" : "IEABWYFPJUADYZLK",
+    "type_of_ticket" : "IEABWYFPJUACL4XQ"
+}
+
+# Default values for custom fields
+default_values = {
+    "contact": "",
+    "sw_version": "",
+    "amr_no" : [""],
+    "primary_item": "",
+    "secondary_item": [""],
+    "request_squad": "",
+    "priority": "",
+    "cause": "",
+    "recovery_way": "",
+    "product" : "" ,
+    "sla" : "",
+    "incident":"",
+    "glory" : "",
+    "type_of_ticket" : "",
+    "assignee": "missing.user@rapyuta-robotics.com",
+    "author": "missing.user@rapyuta-robotics.com",
+}
+
+# Mapping from Wrike statuses to multiple Azure DevOps statuses fro Task
+issue_status_mapping = {
+    "Open": ["Open"],
+    "Closed" : ["Closed"],
+    "In Progress" : ["In Progress"],
+    "Active" : ["Active"],  
+    "Checking(RR)": ["Checking(RR)"],
+    "Checking(GL)": ["Checking(GL)"],
+    "Recovered": ["Recovered"],
+    "Investigating Bug or Spec" : ["Investigating Bug or Spec"],
+    "Report to Customer": ["Report to Customer"],
+    "Wait for Customer/CS Responce" : ["Wait for Customer/CS Responce"],  
+    "Waiting for Bug Fix": ["Waiting for Bug Fix","Wait for Bug Fix"], 
+    "Wait for Hw Fix": ["Wait for Hw Fix"],
+    "Waiting for Setting Change": ["Waiting for Setting Change"], 
+    "Wait for New Feature": ["Wait for New Feature"],
+    "Completed": ["Completed"],
+    "Removed" : ["Removed"],
+    "Duplicate": ["Duplicate"],
+    "No Rosbags/logs for check": ["No Rosbags/logs for check"],
+    "Wait for Reproduce" : ["Wait for Reproduce"],
+
+}
+
+# Function to fetch task details from Wrike
+def fetch_task_details(task_id):
+    url = f"https://www.wrike.com/api/v4/tasks/{task_id}"
+    headers = {"Authorization": f"Bearer {wrike_token}"}
+    response = requests.get(url, headers=headers)
+    #print(response)
+    
+    if response.status_code == 200:
+        result=response.json()['data'][0]
+        #print(result)
+        return result
+    else:
+        print(f"Failed to fetch details for task ID: {task_id}")
+        return None
+    
+
+
+# Function to Fetch Assignee Name from Wrike:
+def fetch_assignee_name(user_id):
+    url = "https://www.wrike.com/api/v4"
+    headers = {'Authorization': f'Bearer {wrike_token}'}
+    response = requests.get(f'{url}/users/{user_id}', headers=headers)
+    glory_mail = 'glory_to_rapyuta_report_mail@rapyuta-robotics.com'
+    print("response",response)
+
+
+    if response.json()['data'][0]['deleted']:
+        return default_values['assignee']
+    elif glory_mail == response.json()['data'][0]['primaryEmail'] :
+        return default_values['assignee']
+    elif response.status_code == 200:
+        return response.json()['data'][0]['primaryEmail']
+    else:
+        return default_values['assignee'] 
+
+# Function to Fetch Author Name from Wrike:
+def fetch_author_name(user_id):
+    url = "https://www.wrike.com/api/v4"
+    headers = {'Authorization': f'Bearer {wrike_token}'}
+    response = requests.get(f'{url}/users/{user_id}', headers=headers)
+    glory_author = 'info_rr_gly2@ml.glory.co.jp'
+    wrikebot_author = 'robot1794223forms@wrike-robot.com'
+
+    if response.json()['data'][0]['deleted'] :
+        return default_values['author']
+    elif glory_author == response.json()['data'][0]['primaryEmail'] :
+        return default_values['assignee']
+    elif wrikebot_author == response.json()['data'][0]['primaryEmail'] :
+        return default_values['assignee']
+    elif response.status_code == 200:
+        return response.json()['data'][0]['primaryEmail']
+    else:
+        return default_values['author']
+
+# Fetches the value of a custom field based on its ID and returns a default if empty
+def get_custom_field_value(custom_fields, field_id, default_value=None):
+    for field in custom_fields:
+        if field['id'] == field_id:
+            # Check if the value is empty or None
+            if not field['value']:  # This checks for empty strings, None, and other falsy values
+                return default_value
+            return field['value']
+    return default_value  # Return default if the field is not found
+
+
+# Function to fetch custom status details from Wrike
+def get_custom_status(status_id):
+    url = f"https://www.wrike.com/api/v4/customstatuses/{status_id}"
+    headers = {'Authorization': f'Bearer {wrike_token}'}
+    response = requests.get(url, headers=headers)
+    
+    if response.status_code == 200:
+        return response.json()['data'][0]
+    else:
+        print(f"Failed to get custom status details: {response.status_code}")
+        return None  
+
+
+# Update State to the Azure Boards
+def update_azure_task_state(work_item_id, new_state):
+    url = f"https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/{work_item_id}?api-version=6.0"
+    headers = {
+        "Content-Type": "application/json-patch+json",
+        "Authorization": f"Basic {base64.b64encode(f':{azure_pat}'.encode()).decode()}"
+    }
+    body = [
+        {
+            "op": "add",
+            "path": "/fields/System.State",
+            "value": new_state
+        }
+    ]
+    response = requests.patch(url, headers=headers, data=json.dumps(body))
+    
+    if response.status_code == 200 or response.status_code == 201:
+        print("Work item state updated successfully.")
+        return response.json()
+    else:
+        print(f"Failed to update in work item State : {response.status_code}")
+        response.raise_for_status()
+
+
+
+# Fetch comments for a specific task from Wrike
+def fetch_task_comments(task_id):
+    url = f"https://www.wrike.com/api/v4/tasks/{task_id}/comments"
+    headers = {"Authorization": f"Bearer {wrike_token}"}
+    response = requests.get(url, headers=headers)
+    if response.status_code == 200:
+        return response.json()['data']
+    else:
+        print(f"Failed to fetch comments for task {task_id}: {response.status_code}")
+        print(response.text)
+        return []
+
+
+# Fetch attachments for a specific task from Wrike
+def fetch_task_attachments(task_id):
+    url = f"https://www.wrike.com/api/v4/tasks/{task_id}/attachments"
+    headers = {"Authorization": f"Bearer {wrike_token}"}
+    response = requests.get(url, headers=headers)
+    if response.status_code == 200:
+        return response.json()['data']
+    else:
+        print(f"Failed to fetch attachments for task {task_id}: {response.status_code}")
+        print(response.text)
+        return [] 
+
+
+# Fetch attachment's url for a specific task from Wrike
+def fetch_attachments_url(attachment_id):
+    url = f"https://www.wrike.com/api/v4/attachments/{attachment_id}/url"
+    headers = {"Authorization": f"Bearer {wrike_token}"}
+    response = requests.get(url, headers=headers)
+    if response.status_code == 200:
+        return response.json()['data'][0]['url']  # Correcting to get the URL directly
+    else:
+        print(f"Failed to fetch attachments URL for task {attachment_id}: {response.status_code}")
+        print(response.text)
+        return None
+    
+
+# Fetch attachment's data for a specific task from Wrike
+def fetch_attachment_data(attachment_url):
+    response = requests.get(attachment_url)
+    if response.status_code == 200:
+        return response.content
+    else:
+        print(f"Failed to fetch attachment data from {attachment_url}: {response.status_code}")
+        print(response.text)
+        return None
+
+
+# Post Commends to Azure Boards in Discussion session
+def post_commends_to_azure(work_item_id, comment):
+    url = f"https://dev.azure.com/{organization}/{project}/_apis/wit/workItems/{work_item_id}/comments?api-version=6.0-preview.3"
+    headers = {
+        'Content-Type': 'application/json',  # Updated Content-Type
+        'Authorization': 'Basic ' + base64.b64encode(f":{azure_pat}".encode()).decode()
+    }
+    data = {"text": comment['text']}
+    response = requests.post(url, headers=headers, json=data)
+    if response.status_code == 200 or response.status_code == 201:
+        return response.json()
+    else:
+        print(f"Empty Command is Posted!")
+        return None
+    
+    
+# Post Attachment to the Azure Boards
+def post_attachment_to_azure(task_id, attachment_id, attachment_name):
+    attachment_url = fetch_attachments_url(attachment_id)
+    if attachment_url:
+        attachment_data = fetch_attachment_data(attachment_url)
+        if attachment_data:
+            url = f"https://dev.azure.com/{organization}/{project}/_apis/wit/attachments?fileName={attachment_name}&api-version=6.0"
+            headers = {
+                "Authorization": f"Basic {base64.b64encode(f':{azure_pat}'.encode()).decode()}",
+                "Content-Type": "application/octet-stream"
+            }
+            timeout = 1800
+            response = requests.post(url, headers=headers, data=attachment_data, timeout=timeout)
+            if response.status_code == 201:
+                azure_attachment_url = response.json()['url']
+                
+                # Attach the uploaded file to a work item
+                json_patch_document = [
+                    {
+                        "op": "add",
+                        "path": "/relations/-",
+                        "value": {
+                            "rel": "AttachedFile",
+                            "url": azure_attachment_url,
+                            "attributes": {
+                                "comment": "Migrated from Wrike"
+                            }
+                        }
+                    }
+                ]
+                patch_url = f"https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/{task_id}?api-version=6.0"
+                patch_headers = {
+                    "Content-Type": "application/json-patch+json",
+                    "Authorization": f"Basic {base64.b64encode(f':{azure_pat}'.encode()).decode()}"
+                }
+                patch_response = requests.patch(patch_url, headers=patch_headers, json=json_patch_document)
+                if patch_response.status_code in [200, 201]:
+                    print(f"Successfully posted attachment '{attachment_name}' to Azure Boards.")
+                else:
+                    print(f"Failed to attach file to work item '{attachment_name}' in Azure: {patch_response.status_code}")
+                    print(patch_response.text)
+            else:
+                print(f"Failed to post attachment '{attachment_name}' to Azure: {response.status_code}")
+                print(response.text)
+        else:
+            print(f"Failed to fetch attachment data for {attachment_id} from Wrike.")
+    else:
+        print(f"Failed to fetch attachment URL for attachment {attachment_id} from Wrike.")
+
+
+
+
+# Function to create tasks in Azure Boards
+def create_azure_task(task_data):
+    workItemType = "issue" 
+    url = f"https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/${workItemType}?api-version=6.0"
+    headers = {
+        "Content-Type": "application/json-patch+json",
+        "Authorization": f"Basic {base64.b64encode(f':{azure_pat}'.encode()).decode()}"
+    }
+    # print(task_data)
+    # sys.exit()
+
+    body = [
+        {"op": "add", "path": "/fields/System.Title","value": task_data['title']},
+        {"op": "add", "path": "/fields/System.Description","value": task_data['description']},
+        {"op": "add", "path": "/fields/System.AreaPath", "value": task_data['area_path']},
+        {"op": "add", "path": "/fields/System.IterationPath", "value": task_data['iteration_path']},
+        {"op": "add", "path": "/fields/System.AssignedTo","value": task_data['assignee']},
+        {"op": "add", "path": "/fields/Custom.Author","value": task_data['author']},
+
+        {"op": "add", "path": "/fields/Custom.Contact","value": task_data['contact']},
+        {"op": "add", "path": "/fields/Custom.SWVersion","value": task_data['sw_version']},
+        {"op": "add", "path": "/fields/Custom.AMRNO","value": task_data['amr_no']},
+        {"op": "add", "path": "/fields/Custom.PrimaryItem","value": task_data['primary_item']},  
+        #{"op": "add", "path": "/fields/Custom.SecondaryItem","value": task_data['secondary_item']},
+        {"op": "add", "path": "/fields/Custom.RequestSquad","value": task_data['request_squad']},
+        {"op": "add", "path": "/fields/Custom.IssuePriority","value": task_data['priority']},
+        {"op": "add", "path": "/fields/Custom.IssueCause","value": task_data['cause']},
+        {"op": "add", "path": "/fields/Custom.RecoveryWay","value": task_data['recovery_way']},
+        {"op": "add", "path": "/fields/Custom.ProductType","value": task_data['product']},
+        {"op": "add", "path": "/fields/Custom.SLA","value": task_data['sla']},
+        {"op": "add", "path": "/fields/Custom.Incident","value": task_data['incident']},  
+        {"op": "add", "path": "/fields/Custom.Glory","value": task_data['glory']},
+        {"op": "add", "path": "/fields/Custom.TypeofTicket","value": task_data['type_of_ticket']},
+         
+        {"op": "add", "path": "/fields/Custom.Predecessors","value": task_data['predecessors']},
+        {"op": "add", "path": "/fields/Custom.Successors","value": task_data['successors']},
+    ]
+    response = requests.post(url, headers=headers, data=json.dumps(body))
+    #print(response)
+    # if response.status_code in [200, 201]:
+    #         azure_work_item = response.json()
+    #         work_item_id = azure_work_item['id']
+    #         #print(f"Successfully created task in Azure: {work_item_id}")
+
+    #         # Add the specific tag "sprint20"
+    #         tag_patch = [
+    #             {
+    #                 "op": "add",
+    #                 "path": "/fields/System.Tags",
+    #                 "value": "sprint28, fe-tasks",
+    #             }
+    #         ]
+    #         tag_response = requests.patch(f"https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/{work_item_id}?api-version=6.0", headers=headers, json=tag_patch)
+    #         if tag_response.status_code in [200, 201]:
+    #             print("Tags added successfully.")
+    #         else:
+    #             print(f"Failed to add tag: {tag_response.status_code} {tag_response.text}")
+                
+    #         return response.json()
+    # else:
+    #     print(f"Failed to create Azure work item: {response.status_code} {response.text}")
+    #     return None
+    #print(response)
+    #print(response.json())
+    if response.status_code == 200 or response.status_code == 201:
+        return response.json()
+    else:
+        print(f"\nFailed to Post Parent Tasks in Azure : {response.status_code} - {task_data['title']}")
+
+
+
+def update_migration_log(wrike_id, migrated_azure_task_id,predecessor_link_array,successor_link_array):
+    csv_file_path = 'issue_migration_log.csv'  # Define the path to your CSV file here
+    
+    # Open the CSV file in append mode
+    with open(csv_file_path, mode='a', newline='') as file:
+        writer = csv.writer(file)
+        
+        # Write the wrike_id and migrated_azure_task_id to the CSV file
+        writer.writerow([wrike_id,migrated_azure_task_id,predecessor_link_array,successor_link_array])
+
+
+# Check if the task ID is already present in the log file
+def is_task_already_migrated(task_id):
+    LOG_FILE_PATH = "issue_migration_log.csv"
+    if not os.path.isfile(LOG_FILE_PATH):
+        return False
+    
+    with open(LOG_FILE_PATH, 'r') as csvfile:
+        reader = csv.reader(csvfile)
+        for row in reader:
+            if row[0] == task_id:
+                return True
+    return False
+
+
+def get_task_dependencies(task_id):
+    url = "https://www.wrike.com/api/v4"
+    headers = {'Authorization': f'Bearer {wrike_token}'}
+    response = requests.get(f'{url}/tasks/{task_id}/dependencies', headers=headers)
+    
+    if response.status_code == 200:
+        dependencies = response.json()
+        return dependencies['data']
+    else:
+        print(f"Failed to fetch dependencies: {response.status_code} - {response.text}")
+        return None
+
+
+def get_depend_task_details(task_id):
+    url = f"https://www.wrike.com/api/v4/tasks/{task_id}"
+    headers = {'Authorization': f'Bearer {wrike_token}'}
+    response = requests.get(url, headers=headers)
+    
+    if response.status_code == 200:
+        task_details = response.json()
+        return task_details['data'][0]
+    else:
+        print(f"Failed to fetch task details: {response.status_code} - {response.text}")
+        return None
+
+
+def extract_dependencies_task_links(task):
+    predecessor_link_array = []
+    successor_link_array = []
+
+    dependencies = get_task_dependencies(task['id'])
+
+    for dependency in dependencies:
+        predecessor_details = get_depend_task_details(dependency['predecessorId'])
+        successor_details = get_depend_task_details(dependency['successorId'])
+
+        if task['id'] != predecessor_details['id']:
+            predecessor_link = predecessor_details['permalink']
+            predecessor_link_array.append(predecessor_link)
+
+        if task['id'] != successor_details['id']:
+            successor_link = successor_details['permalink']
+            successor_link_array.append(successor_link)
+
+    return predecessor_link_array, successor_link_array
+
+def get_final_product(product):
+    try:
+        # Check if product is a valid string and attempt to load JSON
+        if isinstance(product, str) and product.strip():
+            product_data = json.loads(product)
+            # Ensure it's a list and return the first element
+            if isinstance(product_data, list) and product_data:
+                return product_data[0]
+            else:
+                return product  # Return as-is if it's not a list but valid JSON
+        elif isinstance(product, list) and product:
+            # If product is already a list, return the first element
+            return product[0]
+        else:
+            return default_values['product']  # Fallback to default if empty or invalid
+    except json.JSONDecodeError:
+        # Fallback in case of JSON decoding error
+        return default_values['product']
+
+
+def load_task_ids(csv_file):
+    df = pd.read_csv(csv_file)
+    return df['wrikeid'].tolist()
+
+
+
+# Function to migrate tasks from Wrike to Azure Boards
+def migrate_tasks():
+        
+    csv_file = 'primary support.csv'
+    wrike_tasks_ids = load_task_ids(csv_file)
+
+    for task_id in wrike_tasks_ids:
+        task = fetch_task_details(task_id)
+        print("Task Fetched for",task_id)
+
+        #assignee = fetch_assingee_name('KUAQTGVB')
+        
+        # author = fetch_author_name(task.get('authorIds', [default_values['author']])[0])
+        # print(author)
+        # sys.exit()
+        responsible_ids = task.get('responsibleIds', [])
+        if responsible_ids:
+            assignee_email = fetch_assignee_name(responsible_ids[0])
+        else:
+           assignee_email = default_values['assignee']
+
+        if is_task_already_migrated(task['id']):
+            print(f"Task {task['id']} is already migrated. Skipping...")
+            continue
+
+        predecessor_link_array, successor_link_array = extract_dependencies_task_links(task)
+        predecessor_links = "\n".join(predecessor_link_array)
+        successor_links = "\n".join(successor_link_array)
+
+        amr_no = get_custom_field_value(task['customFields'], custom_field_ids['amr_no'], default_values['amr_no'])
+        #secondary_item =  get_custom_field_value(task['customFields'], custom_field_ids['secondary_item'], default_values['secondary_item'])
+        product_fetch = get_custom_field_value(task['customFields'], custom_field_ids['product'], default_values['product'])
+
+        if isinstance(amr_no, str):
+            final_amr_no = json.loads(amr_no)[0]
+        elif isinstance(amr_no, list):
+            final_amr_no = amr_no[0]
+
+        # if isinstance(secondary_item, str):
+        #     final_secondary_item = json.loads(secondary_item)[0]
+        # elif isinstance(secondary_item, list):
+        #     final_secondary_item = secondary_item[0]
+
+        # if isinstance(product_fetch, str):
+        #     final_product = json.loads(product_fetch)[0]
+        # elif isinstance(product_fetch, list):
+        #     final_product = product_fetch[0]
+        final_product = get_final_product(product_fetch)
+        #print(task.get('responsibleIds', [default_values['assignee']])[0])
+        
+        
+        # Prepare task data
+        task_data = {
+           "title": task['title'], ##
+            "area_path": area_path,
+            "iteration_path": iteration_path,
+            "created_date": task['createdDate'],
+            "description" : task['description'],
+            "author" : fetch_author_name(task.get('authorIds', [default_values['author']])[0]),
+            "assignee": assignee_email,
+
+            "contact": get_custom_field_value(task['customFields'], custom_field_ids['contact'], default_values['contact']),
+            "sw_version": get_custom_field_value(task['customFields'], custom_field_ids['sw_version'], default_values['sw_version']),
+            "amr_no" : final_amr_no,
+            "primary_item": get_custom_field_value(task['customFields'], custom_field_ids['primary_item'], default_values['primary_item']),
+           # "secondary_item": final_secondary_item,
+            "request_squad": get_custom_field_value(task['customFields'], custom_field_ids['request_squad'], default_values['request_squad']),
+            "priority": get_custom_field_value(task['customFields'], custom_field_ids['priority'], default_values['priority']),
+            "cause": get_custom_field_value(task['customFields'], custom_field_ids['cause'], default_values['cause']),
+            "recovery_way": get_custom_field_value(task['customFields'], custom_field_ids['recovery_way'], default_values['recovery_way']),
+            "product" : final_product,
+            "sla" : get_custom_field_value(task['customFields'], custom_field_ids['sla'], default_values['sla']),
+            "incident":get_custom_field_value(task['customFields'], custom_field_ids['incident'], default_values['incident']),
+            "glory" : get_custom_field_value(task['customFields'], custom_field_ids['glory'], default_values['glory']),
+            "type_of_ticket" : get_custom_field_value(task['customFields'], custom_field_ids['type_of_ticket'], default_values['type_of_ticket']),
+
+            "predecessors" : predecessor_links,
+            "successors" : successor_links,
+        }
+
+        # print(task_data)
+        # sys.exit()
+    
+        print(task_data['title'])
+
+        created_task = create_azure_task(task_data)
+        #print(created_task)
+        print(f"\nCreated Parent task: {created_task['id']} - {created_task['fields']['System.Title']}")
+
+        if created_task:
+            wrike_task_id = task['id']
+            azure_task_id = created_task['id']
+
+            #Update State
+            status_id = task['customStatusId']
+            wrike_status = get_custom_status(status_id)['name']
+            for azure_state_key, wrike_status_value in issue_status_mapping.items():
+                if wrike_status in wrike_status_value:
+                    azure_state = azure_state_key
+            update_azure_task_state(azure_task_id, azure_state)
+
+            # Migrate comments
+            comments = fetch_task_comments(wrike_task_id)
+            comments.reverse()
+            for comment in comments:
+                post_commends_to_azure(azure_task_id, comment)
+            print("All Commands Migrated Sucessfully!")
+
+            # Migrate attachments
+            attachments = fetch_task_attachments(wrike_task_id)
+            for attachment in attachments:
+                post_attachment_to_azure(azure_task_id, attachment['id'], attachment['name'])
+            print("All Attachments Migrated Sucessfully!")
+
+            #Log the migrated task ID
+            update_migration_log(task['id'], created_task['id'],predecessor_link_array,successor_link_array)
+            # sys.exit()
+
+# MAIN
+if __name__ == '__main__':
+    migrate_tasks()
+    print("\nCongratulations!")
