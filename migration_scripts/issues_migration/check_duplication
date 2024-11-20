@@ -1,0 +1,105 @@
+import requests
+import json
+import base64
+
+# Azure DevOps configuration
+ORGANIZATION = "rapyuta-robotics"
+PROJECT = "sootballs"
+PAT = ""  # Replace with your PAT
+AREA_PATH = "sootballs\\sootballs_support"
+
+# Base URL for Azure DevOps REST API
+BASE_URL = f"https://dev.azure.com/{ORGANIZATION}/{PROJECT}/_apis/wit/workitems"
+
+# Headers for authentication and content-type
+HEADERS = {
+    'Content-Type': 'application/json',
+    "Authorization": f"Basic {base64.b64encode(f':{PAT}'.encode()).decode()}"
+}
+
+
+
+def remove_duplicate_issues():
+    work_items = get_work_items(AREA_PATH)
+
+    if not work_items:
+        print(f"No work items found in {AREA_PATH}.")
+        return
+
+    titles_seen = set()
+    duplicates = []
+
+    print("\nProcessing work items in the area path...")
+    for item in work_items:
+        work_item_id = item['id']
+        work_item_details = get_work_item_details(work_item_id)
+        work_item_title = work_item_details['fields']['System.Title']
+
+        print(f"Checking work item: {work_item_id} - {work_item_title}")
+
+        if work_item_title in titles_seen:
+            duplicates.append(work_item_id)
+            print(f"Marked as duplicate: {work_item_id} - {work_item_title}")
+        else:
+            titles_seen.add(work_item_title)
+
+    if duplicates:
+        print(f"\nFound {len(duplicates)} duplicate work items. Deleting one of each duplicate set...")
+        for work_item_id in duplicates:
+            work_item_details = get_work_item_details(work_item_id)
+            if work_item_details:
+                # Delete child tasks first if any
+                if 'relations' in work_item_details:
+                    child_tasks = [relation['url'].split('/')[-1] for relation in work_item_details['relations'] if relation['rel'] == 'System.LinkTypes.Hierarchy-Forward']
+                    for child_task_id in child_tasks:
+                        print(f"Deleting child task: {child_task_id}")
+                        delete_work_item(child_task_id)
+
+                # Then delete the parent task (duplicate work item)
+                print(f"Deleting duplicate work item: {work_item_id}")
+                delete_work_item(work_item_id)
+
+    else:
+        print("No duplicate work items found.")
+
+def get_work_items(area_path):
+    """Fetch work items by area path."""
+    url = f"https://dev.azure.com/{ORGANIZATION}/{PROJECT}/_apis/wit/wiql?api-version=6.0"
+    query = {
+        "query": f"SELECT [System.Id], [System.Title] FROM WorkItems WHERE [System.AreaPath] = '{area_path}' AND [System.WorkItemType] = 'issue'"
+    }
+    response = requests.post(url, headers=HEADERS, json=query)
+    
+    if response.status_code == 200:
+        result = response.json()
+        work_items = result['workItems']
+        return work_items
+    else:
+        print(f"Error fetching work items: {response.status_code} - {response.text}")
+        return []
+
+def get_work_item_details(work_item_id):
+    """Retrieve details of a specific work item by ID."""
+    url = f"{BASE_URL}/{work_item_id}?api-version=6.0"
+    response = requests.get(url, headers=HEADERS)
+    
+    if response.status_code == 200:
+        work_item_details = response.json()
+        return work_item_details
+    else:
+        print(f"Error fetching work item details: {response.status_code} - {response.text}")
+        return None
+
+def delete_work_item(work_item_id):
+    """Delete a specific work item by ID."""
+    url = f"{BASE_URL}/{work_item_id}?api-version=6.0"
+    response = requests.delete(url, headers=HEADERS)
+    
+    if response.status_code == 204:
+        print(f"Successfully deleted work item: {work_item_id}")
+    else:
+        print(f"Error deleting work item: {response.status_code} - {response.text}")
+
+# Run the script
+if __name__ == "__main__":
+    remove_duplicate_issues()
