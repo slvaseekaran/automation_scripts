@@ -1,0 +1,52 @@
+name: Run Python Script
+
+# Trigger the workflow manually with inputs
+on:
+  workflow_dispatch:
+    inputs:
+      query_id:
+        description: 'Query ID for Azure DevOps'
+        required: true
+        type: string
+      doc_name:
+        description: 'Name of the output Word document'
+        required: true
+        type: string
+
+# Define the jobs to run
+jobs:
+  run-python-script:
+    runs-on: ubuntu-latest  # Use the latest Ubuntu environment
+
+    steps:
+      # Check out the repository
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      # Set up Python
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'  # Specify the Python version you need
+
+      # Install dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Run the Python script with inputs
+      - name: Run Python script
+        env:
+          AZURE_PAT: ${{ secrets.AZURE_PAT }}  # Use the PAT stored in GitHub Secrets
+          QUERY_ID: ${{ github.event.inputs.query_id }}  # Pass the Query ID as an environment variable
+          DOC_NAME: ${{ github.event.inputs.doc_name }}  # Pass the Document Name as an environment variable
+        run: |
+          python path/to/your_script.py  # Replace with the path to your script
+
+      # Upload the generated Word document as an artifact
+      - name: Upload Word document
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ github.event.inputs.doc_name }}  # Use the provided document name
+          path: ${{ github.event.inputs.doc_name }}  # Use the provided document name
