@@ -27,7 +27,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.9'  # Specify the Python version you need
+          python-version: '3.10'  # Specify the Python version you need
 
       # Install dependencies
       - name: Install dependencies
@@ -42,7 +42,7 @@ jobs:
           QUERY_ID: ${{ github.event.inputs.query_id }}  # Pass the Query ID as an environment variable
           DOC_NAME: ${{ github.event.inputs.doc_name }}  # Pass the Document Name as an environment variable
         run: |
-          python path/to/your_script.py  # Replace with the path to your script
+          python Sprint_analaysis/workitem_script.py  # Replace with the path to your script
 
       # Upload the generated Word document as an artifact
       - name: Upload Word document
